@@ -1,0 +1,12 @@
+[Unit]
+After=network.target
+
+[Service]
+EnvironmentFile=-/etc/sysconfig/sms
+ExecStart=/bin/sh -c 'exec /usr/local/bin/sms \
+  $SMS_EXTRA_OPTS &>>/var/log/sms.log'
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

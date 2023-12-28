@@ -1,14 +1,15 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
-	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/liuliqiang/log4go"
 	gomail "gopkg.in/mail.v2"
@@ -28,43 +29,50 @@ func main() {
 	}
 	addr := fmt.Sprintf("0.0.0.0:%s", port)
 
-	http.HandleFunc("/sms", func(w http.ResponseWriter, r *http.Request) {
-		reqData, err := ioutil.ReadAll(r.Body)
-		if err != nil {
-			log4go.Error("Failed to get request data: %v", err)
-			w.WriteHeader(http.StatusBadRequest)
-			return
-		}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/sms", smsHTTPHandler)
+	server := &http.Server{
+		Addr:    addr,
+		Handler: mux,
+	}
 
-		var sms smsInfo
-		if err = json.Unmarshal(reqData, &sms); err != nil {
-			log4go.Error("Failed to parse request data: %v", err)
-			w.WriteHeader(http.StatusBadRequest)
-			return
-		}
-
-		log4go.Info("sms from: %s", sms.GetFrom())
-		log4go.Info("sms msg: %s", sms.GetSMS())
-		go func() {
-			defer func() {
-				if err := recover(); err != nil {
-					log4go.Error("send email panic: %v", err)
-				}
-			}()
-			for i := 0; i < retryCount; i++ {
-				if err = sendEmail(&sms); err != nil {
-					log4go.Error("Failed to send email(%d/%d): %v", i+1, retryCount, err)
-				} else {
-					log4go.Info("Send sms success")
-					return
-				}
-			}
-		}()
-		w.WriteHeader(http.StatusOK)
-	})
+	ctx, cancel := context.WithCancel(context.Background())
+	signalHandler(ctx, cancel)
 
 	log4go.Info("Sms to email server listen at: %s", addr)
-	http.ListenAndServe(addr, nil)
+	go func() {
+		defer func() {
+			if err := recover(); err != nil {
+				log4go.Error("http server panic: %v", err)
+			}
+		}()
+		if err := server.ListenAndServe(); err != nil {
+			log4go.Error("http server listen and serve: %v", err)
+		}
+		cancel()
+	}()
+
+	<-ctx.Done()
+	log4go.Info("Ready to shutdown http server")
+	_ = server.Shutdown(context.Background())
+	log4go.Info("Shutdown http server success")
+}
+
+// add signal handler for graceful shutdown
+func signalHandler(ctx context.Context, cancelFunc context.CancelFunc) {
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGTERM, syscall.SIGINT)
+
+	go func() {
+		select {
+		case <-sigChan:
+			log4go.Info("Receive signal, cancel context")
+			cancelFunc()
+		case <-ctx.Done():
+			log4go.Info("Context canceled, signal handler exit")
+			return
+		}
+	}()
 }
 
 type smsInfo struct {
@@ -87,9 +95,9 @@ func (i *smsInfo) GetSMS() string {
 }
 
 func sendEmail(sms *smsInfo) error {
-	srcEmail = os.Getenv("SRC_EMAIL_ADDR")
-	emailPass = os.Getenv("SRC_EMAIL_PASS")
-	dstEmail = os.Getenv("DEST_EMAIL_ADDR")
+	srcEmail = os.Getenv("SENDER_EMAIL_ADDR")
+	emailPass = os.Getenv("SENDER_EMAIL_PASS")
+	dstEmail = os.Getenv("RECEIVER_EMAIL_ADDR")
 	log4go.Info("email: '%s', password: '%s****'", srcEmail, emailPass[:4])
 
 	// Message.
